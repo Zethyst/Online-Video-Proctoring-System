@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+websockets
+opencv-python-headless
+tensorflow-cpu
+mtcnn
+fer
+numpy
+python-multipart
+moviepy==1.0.3
+motor
+python-dotenv
