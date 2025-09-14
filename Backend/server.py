@@ -39,11 +39,12 @@ class VideoProctorAPI:
         # CORS middleware for Next.js frontend
         self.app.add_middleware(
             CORSMiddleware,
-            allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*", "https://online-video-proctoring-system.vercel.app"],
-            allow_credentials=True,
+            allow_origins=["*"], 
+            allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
         
         # Active sessions storage
         self.active_sessions: Dict[str, dict] = {}

@@ -17,6 +17,10 @@
 ![mongodb](https://img.shields.io/badge/MongoDB-4EA94B?style=for-the-badge&logo=mongodb&logoColor=white)&nbsp;
 ![python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)&nbsp;
 ![fastapi](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)&nbsp;
+![TensorFlow](https://img.shields.io/badge/TensorFlow-FF6F00?style=for-the-badge&logo=tensorflow&logoColor=white)&nbsp;
+![OpenCV](https://img.shields.io/badge/OpenCV-5C3EE8?style=for-the-badge&logo=opencv&logoColor=white)&nbsp;
+![NumPy](https://img.shields.io/badge/NumPy-013243?style=for-the-badge&logo=numpy&logoColor=white)&nbsp;
+
 
 **Deployed On:**
 
@@ -44,9 +48,8 @@
 
 ## 📌 Screenshots:
 
-![home](/img/home.png)
-![table](/img/generate.png)
-![report](/img/generate.png)
+![home](/img/Home.png)
+![report](/img/Report.png)
 
 ## 🚀 Getting Started:
 
@@ -70,18 +73,18 @@ Follow these steps to run the Next.js project on your local machine:
 
 2.  **Install Dependencies:**
 
-        Frontend using npm:
+    Frontend using npm:
 
-        ```sh
-        npm install
-        ```
+    ```sh
+    npm install
+    ```
 
-        Backend using pip:
+    Backend using pip:
 
-        ```sh
-        pip install -r requirements.txt
-        ```
-        # Download TensorFlow model
+    ```sh
+    pip install -r requirements.txt
+    ```
+    # Download TensorFlow model
 
     curl -O http://download.tensorflow.org/models/object_detection/ssd_mobilenet_v2_coco_2018_03_29.tar.gz
     tar -xvzf ssd_mobilenet_v2_coco_2018_03_29.tar.gz
