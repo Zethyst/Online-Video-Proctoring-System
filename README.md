@@ -84,12 +84,12 @@ Follow these steps to run the Next.js project on your local machine:
     ```sh
     pip install -r requirements.txt
     ```
-    # Download TensorFlow model
+    ## Download TensorFlow model
 
     curl -O http://download.tensorflow.org/models/object_detection/ssd_mobilenet_v2_coco_2018_03_29.tar.gz
     tar -xvzf ssd_mobilenet_v2_coco_2018_03_29.tar.gz
 
-    # Ensure correct moviepy version
+    ## Ensure correct moviepy version
 
     pip install moviepy==1.0.3
 
