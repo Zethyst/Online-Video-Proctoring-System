@@ -17,7 +17,7 @@ const OldReports = ({ setShowReport, downloadPDF, sessionReport, setSessionRepor
     const [loading, setLoading] = useState(true);
     const [pagination, setPagination] = useState({
         page: 1,
-        limit: 10,
+        limit: 5,
         total: 0,
         totalPages: 0
     });

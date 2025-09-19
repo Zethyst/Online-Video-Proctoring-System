@@ -2,8 +2,6 @@ import cv2
 import os
 import numpy as np
 import tensorflow as tf
-from mtcnn import MTCNN
-from fer import FER
 import time
 import json
 from datetime import datetime
@@ -13,12 +11,13 @@ import queue
 # Suppress TensorFlow logs
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 class CheatDetectionSystem:
     def __init__(self, model_path='ssd_mobilenet_v2_coco_2018_03_29/saved_model', 
                  detection_threshold=0.3, mobile_threshold=0.05):
         """
-        Initialize the cheat detection system
+        Initialize the cheat detection system with OpenCV Haar cascades
         
         Args:
             model_path: Path to the TensorFlow saved model
@@ -28,30 +27,40 @@ class CheatDetectionSystem:
         self.detection_threshold = detection_threshold
         self.mobile_threshold = mobile_threshold
         
-        # Initialize detectors
-        self.mtcnn_detector = MTCNN()
-        self.emotion_detector = FER()
+        # Initialize OpenCV Haar cascade classifiers 
+        try:
+            self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+            self.eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
+            print("OpenCV Haar cascades loaded successfully")
+        except Exception as e:
+            print(f"Error loading Haar cascades: {e}")
+            self.face_cascade = None
+            self.eye_cascade = None
         
         # Load mobile detection model
+        self.detection_model = None
         try:
-            self.detection_model = tf.saved_model.load(model_path)
-            print("Mobile detection model loaded successfully")
+            if os.path.exists(model_path):
+                self.detection_model = tf.saved_model.load(model_path)
+                print("Mobile detection model loaded successfully")
         except Exception as e:
             print(f"Warning: Could not load mobile detection model: {e}")
-            self.detection_model = None
+            print("Mobile phone detection will be disabled to save memory")
         
         # Tracking variables
         self.reset_counters()
         
-        # Configuration
-        self.frame_skip = 2  # Process every nth frame for performance
+        # Configuration for performance optimization
+        self.frame_skip = 3  # Process every 3rd frame for better performance
         self.frame_counter = 0
+        self.input_width = 320  # Reduced resolution for processing
+        self.input_height = 240
         
         # Improved gaze tracking
         self.face_center_history = []
-        self.face_history_length = 5  # Reduced for more responsive detection
+        self.face_history_length = 5
         self.baseline_face_center = None
-        self.baseline_frames = 30  # Frames to establish baseline
+        self.baseline_frames = 30
         self.baseline_counter = 0
         
         # Alert system
@@ -60,26 +69,32 @@ class CheatDetectionSystem:
         
         # Looking away tracking
         self.consecutive_looking_away = 0
-        self.looking_away_threshold = 5  # Consecutive frames before counting as looking away
+        self.looking_away_threshold = 5
+        
+        # Simple emotion detection based on facial features 
+        self.emotion_history = []
+        self.emotion_history_length = 10
         
     def reset_counters(self):
         """Reset all tracking counters"""
-        self.total_frames_analyzed = 0  # Only frames actually analyzed
-        self.total_frames_captured = 0  # All frames captured
+        self.total_frames_analyzed = 0
+        self.total_frames_captured = 0
         self.looking_away_frames = 0
         self.mobile_detected_frames = 0
         self.multiple_people_frames = 0
         self.no_face_frames = 0
         self.face_detected_frames = 0
+        self.suspicious_emotion_frames = 0
         self.session_start_time = time.time()
         self.baseline_face_center = None
         self.baseline_counter = 0
         self.face_center_history = []
         self.consecutive_looking_away = 0
+        self.emotion_history = []
         
     def detect_mobile_phones(self, frame):
         """
-        Detect mobile phones in the frame using TensorFlow model
+        Detect mobile phones in the frame using TensorFlow model (if available)
         
         Args:
             frame: Input frame
@@ -117,6 +132,66 @@ class CheatDetectionSystem:
             print(f"Error in mobile detection: {e}")
             return []
     
+    def simple_emotion_detection(self, face_region, eyes):
+        """
+        Simple emotion detection based on facial features (replaces FER)
+        
+        Args:
+            face_region: Detected face region
+            eyes: Detected eyes in the face
+            
+        Returns:
+            Emotion classification and confidence
+        """
+        try:
+            # Simple heuristics based on eye detection and facial geometry
+            if len(eyes) == 0:
+                emotion = "suspicious"  # No eyes detected might indicate looking away
+                confidence = 0.7
+            elif len(eyes) >= 2:
+                # Calculate eye positions relative to face
+                eye_positions = []
+                for (ex, ey, ew, eh) in eyes:
+                    eye_center_x = ex + ew // 2
+                    eye_positions.append(eye_center_x)
+                
+                if len(eye_positions) >= 2:
+                    # Check if eyes are roughly aligned (normal state)
+                    eye_diff = abs(eye_positions[0] - eye_positions[1])
+                    face_width = face_region.shape[1]
+                    
+                    if eye_diff < face_width * 0.3:
+                        emotion = "neutral"
+                        confidence = 0.8
+                    else:
+                        emotion = "suspicious"
+                        confidence = 0.6
+                else:
+                    emotion = "neutral"
+                    confidence = 0.5
+            else:
+                emotion = "alert"  # Single eye might indicate partial face turn
+                confidence = 0.6
+            
+            # Add to emotion history for smoothing
+            self.emotion_history.append(emotion)
+            if len(self.emotion_history) > self.emotion_history_length:
+                self.emotion_history.pop(0)
+            
+            # Use majority vote for smoothing
+            if len(self.emotion_history) >= 3:
+                emotion_counts = {e: self.emotion_history.count(e) for e in set(self.emotion_history)}
+                most_common = max(emotion_counts, key=emotion_counts.get)
+                if emotion_counts[most_common] >= 2:
+                    emotion = most_common
+                    confidence = emotion_counts[most_common] / len(self.emotion_history)
+            
+            return emotion, confidence
+            
+        except Exception as e:
+            print(f"Simple emotion detection error: {e}")
+            return "unknown", 0.0
+    
     def calculate_gaze_direction(self, current_center, face_width, frame_width):
         """
         Improved gaze direction calculation based on face position relative to frame center
@@ -151,7 +226,7 @@ class CheatDetectionSystem:
         # Calculate deviation from baseline
         if self.baseline_face_center is not None:
             deviation_x = abs(current_center[0] - self.baseline_face_center[0])
-            deviation_threshold = face_width * 0.15  # Reduced threshold for more sensitive detection
+            deviation_threshold = face_width * 0.15
             
             # Determine direction based on deviation and position
             if deviation_x > deviation_threshold:
@@ -180,7 +255,7 @@ class CheatDetectionSystem:
         if len(self.face_center_history) > self.face_history_length:
             self.face_center_history.pop(0)
         
-        # Use majority vote for smoothing, but don't override strong signals
+        # Use majority vote for smoothing
         if len(self.face_center_history) >= 3 and confidence < 0.8:
             direction_counts = {d: self.face_center_history.count(d) for d in set(self.face_center_history)}
             most_common = max(direction_counts, key=direction_counts.get)
@@ -209,7 +284,7 @@ class CheatDetectionSystem:
         
         # Background for statistics
         overlay = frame.copy()
-        cv2.rectangle(overlay, (10, 10), (450, 180), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (10, 10), (450, 200), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
         
         # Calculate statistics
@@ -219,6 +294,7 @@ class CheatDetectionSystem:
         multiple_people_pct = (self.multiple_people_frames / max(self.total_frames_analyzed, 1)) * 100
         no_face_pct = (self.no_face_frames / max(self.total_frames_analyzed, 1)) * 100
         face_detection_rate = (self.face_detected_frames / max(self.total_frames_analyzed, 1)) * 100
+        suspicious_emotion_pct = (self.suspicious_emotion_frames / max(self.total_frames_analyzed, 1)) * 100
         
         # Display statistics
         stats_text = [
@@ -228,6 +304,7 @@ class CheatDetectionSystem:
             f"Looking Away: {looking_away_pct:.1f}%",
             f"Mobile Detected: {mobile_pct:.1f}%",
             f"Multiple People: {multiple_people_pct:.1f}%",
+            f"Suspicious Behavior: {suspicious_emotion_pct:.1f}%",
             f"No Face: {no_face_pct:.1f}%"
         ]
         
@@ -240,6 +317,8 @@ class CheatDetectionSystem:
                 color = (0, 0, 255)  # Red for high looking away
             elif i == 4 and mobile_pct > 5:
                 color = (0, 0, 255)  # Red for mobile detection
+            elif i == 6 and suspicious_emotion_pct > 15:
+                color = (0, 0, 255)  # Red for suspicious behavior
             else:
                 color = (255, 255, 255)  # White for normal
                 
@@ -248,7 +327,7 @@ class CheatDetectionSystem:
     
     def process_frame(self, frame):
         """
-        Process a single frame for cheat detection
+        Process a single frame for cheat detection using OpenCV Haar cascades
         
         Args:
             frame: Input frame from camera
@@ -259,89 +338,121 @@ class CheatDetectionSystem:
         self.frame_counter += 1
         self.total_frames_captured += 1
         
-        # Skip frames for performance, but always count them
+        # Skip frames for performance
         if self.frame_counter % self.frame_skip != 0:
-            self.draw_statistics(frame)  # Still show stats on skipped frames
+            self.draw_statistics(frame)
             return frame
         
         # This frame will be analyzed
         self.total_frames_analyzed += 1
         original_frame = frame.copy()
         
-        # Detect faces
-        detections = self.mtcnn_detector.detect_faces(frame)
+        # Resize frame for processing to save memory
+        frame_small = cv2.resize(frame, (self.input_width, self.input_height))
+        gray_frame = cv2.cvtColor(frame_small, cv2.COLOR_BGR2GRAY)
+        
+        # Detect faces using Haar cascade (much more memory efficient than MTCNN)
+        faces = []
+        if self.face_cascade is not None:
+            detected_faces = self.face_cascade.detectMultiScale(
+                gray_frame, 
+                scaleFactor=1.1, 
+                minNeighbors=5, 
+                minSize=(30, 30),
+                flags=cv2.CASCADE_SCALE_IMAGE
+            )
+            faces = detected_faces
+        
+        # Scale coordinates back to original frame size
+        scale_x = original_frame.shape[1] / self.input_width
+        scale_y = original_frame.shape[0] / self.input_height
         
         # Handle face detection results
-        if len(detections) == 0:
+        if len(faces) == 0:
             self.no_face_frames += 1
             cv2.putText(frame, "No Face Detected", (50, 50), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            # Reset consecutive looking away counter when no face
             self.consecutive_looking_away = 0
         else:
             self.face_detected_frames += 1
             
-            if len(detections) > 1:
+            if len(faces) > 1:
                 self.multiple_people_frames += 1
-                self.generate_alert("Multiple People", f"Detected {len(detections)} faces")
-                cv2.putText(frame, f"Multiple People: {len(detections)}", (50, 50), 
+                self.generate_alert("Multiple People", f"Detected {len(faces)} faces")
+                cv2.putText(frame, f"Multiple People: {len(faces)}", (50, 50), 
                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
         
         # Process each detected face
-        for i, detection in enumerate(detections):
-            if detection['confidence'] < 0.95:  # Only process high-confidence detections
-                continue
-                
-            x, y, w, h = detection['box']
-            face_center = (x + w // 2, y + h // 2)
+        for i, (x, y, w, h) in enumerate(faces):
+            # Scale coordinates back to original size
+            x_orig = int(x * scale_x)
+            y_orig = int(y * scale_y)
+            w_orig = int(w * scale_x)
+            h_orig = int(h * scale_y)
             
-            # Draw face rectangle
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
+            face_center = (x_orig + w_orig // 2, y_orig + h_orig // 2)
             
-            # Emotion detection
-            try:
-                face_region = original_frame[max(0, y):min(frame.shape[0], y+h), 
-                                           max(0, x):min(frame.shape[1], x+w)]
-                emotion_result = self.emotion_detector.detect_emotions(face_region)
-                
-                if emotion_result and len(emotion_result) > 0:
-                    emotions_dict = emotion_result[0]['emotions']
-                    dominant_emotion, confidence = max(emotions_dict.items(), key=lambda x: x[1])
-                    
-                    # Color code emotions
-                    emotion_color = (0, 255, 0) if dominant_emotion in ['happy', 'neutral'] else (0, 165, 255)
-                    
-                    cv2.putText(frame, f"{dominant_emotion}: {confidence:.2f}", 
-                               (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, emotion_color, 2)
-                else:
-                    cv2.putText(frame, "Emotion: Unknown", (x, y - 10), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            except Exception as e:
-                print(f"Emotion detection error: {e}")
+            cv2.rectangle(frame, (x_orig, y_orig), (x_orig + w_orig, y_orig + h_orig), (255, 0, 0), 2)
             
-            # Improved gaze direction calculation
+            # Detect eyes within the face region for emotion analysis
+            face_gray = gray_frame[y:y+h, x:x+w]
+            eyes = []
+            if self.eye_cascade is not None:
+                detected_eyes = self.eye_cascade.detectMultiScale(
+                    face_gray,
+                    scaleFactor=1.1,
+                    minNeighbors=3,
+                    minSize=(10, 10)
+                )
+                eyes = detected_eyes
+            
+            # Simple emotion detection based on facial features
+            face_region_small = frame_small[y:y+h, x:x+w]
+            emotion, emotion_confidence = self.simple_emotion_detection(face_region_small, eyes)
+            
+            # Track suspicious emotions
+            if emotion in ['suspicious', 'alert']:
+                self.suspicious_emotion_frames += 1
+            
+            # Color code emotions
+            emotion_color = (0, 255, 0) if emotion == 'neutral' else (0, 165, 255)
+            if emotion == 'suspicious':
+                emotion_color = (0, 0, 255)
+            
+            cv2.putText(frame, f"{emotion}: {emotion_confidence:.2f}", 
+                       (x_orig, y_orig - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, emotion_color, 2)
+            
+            # Draw detected eyes
+            for (ex, ey, ew, eh) in eyes:
+                eye_x = x_orig + int(ex * scale_x)
+                eye_y = y_orig + int(ey * scale_y)
+                eye_w = int(ew * scale_x)
+                eye_h = int(eh * scale_y)
+                cv2.rectangle(frame, (eye_x, eye_y), (eye_x + eye_w, eye_y + eye_h), (0, 255, 255), 1)
+            
+            # Gaze direction calculation
             gaze_direction, gaze_confidence = self.calculate_gaze_direction(
-                face_center, w, frame.shape[1])
+                face_center, w_orig, frame.shape[1])
             
             if gaze_direction != "Calibrating":
                 # Color code gaze direction
                 gaze_color = (0, 255, 0) if gaze_direction == "Forward" else (0, 165, 255)
                 cv2.putText(frame, f"Gaze: {gaze_direction} ({gaze_confidence:.2f})", 
-                           (x, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, gaze_color, 2)
+                           (x_orig, y_orig + h_orig + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, gaze_color, 2)
                 
-                # Improved looking away detection with consecutive frame counting
+                # Looking away detection
                 if gaze_direction in ["Left", "Right"] and gaze_confidence > 0.4:
                     self.consecutive_looking_away += 1
                     if self.consecutive_looking_away >= self.looking_away_threshold:
                         self.looking_away_frames += 1
-                        if self.looking_away_frames % 20 == 0:  # Alert every 20 frames of looking away
+                        if self.looking_away_frames % 20 == 0:
                             self.generate_alert("Looking Away", 
                                               f"Direction: {gaze_direction}, Confidence: {gaze_confidence:.2f}")
                 else:
                     self.consecutive_looking_away = 0
             else:
                 cv2.putText(frame, f"Gaze: {gaze_direction}", 
-                           (x, y + h + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                           (x_orig, y_orig + h_orig + 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         # Detect mobile phones
         mobile_detections = self.detect_mobile_phones(original_frame)
@@ -380,12 +491,14 @@ class CheatDetectionSystem:
                 'looking_away_percentage': (self.looking_away_frames / max(self.total_frames_analyzed, 1)) * 100,
                 'mobile_detection_percentage': (self.mobile_detected_frames / max(self.total_frames_analyzed, 1)) * 100,
                 'multiple_people_percentage': (self.multiple_people_frames / max(self.total_frames_analyzed, 1)) * 100,
-                'no_face_percentage': (self.no_face_frames / max(self.total_frames_analyzed, 1)) * 100
+                'no_face_percentage': (self.no_face_frames / max(self.total_frames_analyzed, 1)) * 100,
+                'suspicious_behavior_percentage': (self.suspicious_emotion_frames / max(self.total_frames_analyzed, 1)) * 100
             },
             'cheating_detected': {
                 'gaze_based': (self.looking_away_frames / max(self.total_frames_analyzed, 1)) > self.detection_threshold,
                 'mobile_based': (self.mobile_detected_frames / max(self.total_frames_analyzed, 1)) > self.detection_threshold,
-                'multiple_people': (self.multiple_people_frames / max(self.total_frames_analyzed, 1)) > self.detection_threshold
+                'multiple_people': (self.multiple_people_frames / max(self.total_frames_analyzed, 1)) > self.detection_threshold,
+                'suspicious_behavior': (self.suspicious_emotion_frames / max(self.total_frames_analyzed, 1)) > self.detection_threshold
             },
             'alerts': []
         }
@@ -402,13 +515,14 @@ class CheatDetectionSystem:
     
     def run_detection(self, save_report=True, camera_index=0):
         """
-        Run the main detection loop
+        Run the main detection loop with optimized performance
         
         Args:
             save_report: Whether to save detection report to file
             camera_index: Camera index to use
         """
-        print("Starting Cheat Detection System...")
+        print("Starting Optimized Cheat Detection System...")
+        print("Using OpenCV Haar cascades for better performance on limited memory")
         print("Press 'q' to quit, 'r' to reset counters, 's' to save report, 'c' to recalibrate")
         
         # Try different camera indices if the first one fails
@@ -428,10 +542,11 @@ class CheatDetectionSystem:
             print("Error: Cannot open any camera")
             return None
         
-        # Set camera properties for better performance
+        # Set camera properties for optimal performance
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_FPS, 15)  # Lower FPS for better performance
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer to save memory
         
         try:
             while True:
@@ -444,7 +559,7 @@ class CheatDetectionSystem:
                 processed_frame = self.process_frame(frame)
                 
                 # Display frame
-                cv2.imshow('Cheat Detection System', processed_frame)
+                cv2.imshow('Optimized Cheat Detection System', processed_frame)
                 
                 # Handle key presses
                 key = cv2.waitKey(1) & 0xFF
@@ -469,7 +584,6 @@ class CheatDetectionSystem:
             cap.release()
             cv2.destroyAllWindows()
         
-        # Generate final report
         final_report = self.generate_report()
         
         if save_report:
@@ -479,7 +593,6 @@ class CheatDetectionSystem:
                 json.dump(final_report, f, indent=2)
             print(f"Final report saved to {filename}")
         
-        # Print summary
         print("\n" + "="*50)
         print("DETECTION SUMMARY")
         print("="*50)
@@ -490,23 +603,23 @@ class CheatDetectionSystem:
         print(f"Looking Away: {final_report['statistics']['looking_away_percentage']:.1f}%")
         print(f"Mobile Phone Detected: {final_report['statistics']['mobile_detection_percentage']:.1f}%")
         print(f"Multiple People: {final_report['statistics']['multiple_people_percentage']:.1f}%")
+        print(f"Suspicious Behavior: {final_report['statistics']['suspicious_behavior_percentage']:.1f}%")
         print(f"No Face: {final_report['statistics']['no_face_percentage']:.1f}%")
         print("\nCheating Detected:")
         print(f"  Gaze-based: {final_report['cheating_detected']['gaze_based']}")
         print(f"  Mobile-based: {final_report['cheating_detected']['mobile_based']}")
         print(f"  Multiple people: {final_report['cheating_detected']['multiple_people']}")
+        print(f"  Suspicious behavior: {final_report['cheating_detected']['suspicious_behavior']}")
         print(f"Total Alerts: {len(final_report['alerts'])}")
         
         return final_report
 
-# Usage example
 if __name__ == "__main__":
-    # Initialize the detection system
+    # Initialize the optimized detection system
     detector = CheatDetectionSystem(
-        model_path='ssd_mobilenet_v2_coco_2018_03_29/saved_model',
+        model_path='ssd_mobilenet_v2_coco_2018_03_29/saved_model', 
         detection_threshold=0.3,
         mobile_threshold=0.05
     )
     
-    # Run detection
     report = detector.run_detection(save_report=True)
